@@ -8,4 +8,5 @@ enum DonationStatus: string
     case Matched = 'matched';
     case Accepted = 'accepted';
     case Failed = 'failed';
+    case Expired = 'expired';
 }

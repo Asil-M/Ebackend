@@ -41,38 +41,43 @@ class DonationResponseController extends Controller
         $client = $request->user()->client;
         abort_unless($client, 403, 'Client profile required.');
 
-        if ($donation->type !== DonationType::Request) {
-            throw ValidationException::withMessages([
-                'donation' => 'Help can only be offered for a request.',
-            ]);
-        }
-        if ($donation->status !== DonationStatus::Pending) {
-            throw ValidationException::withMessages([
-                'donation' => 'This request is no longer available.',
-            ]);
-        }
-        if ($donation->client_id === $client->id) {
-            throw ValidationException::withMessages([
-                'donation' => 'You cannot offer help on your own request.',
-            ]);
-        }
+        $response = DB::transaction(function () use ($donation, $client, $validated) {
+            $lockedDonation = Donation::lockForUpdate()->findOrFail($donation->id);
 
-        $alreadyOffered = DonationResponse::where('request_donation_id', $donation->id)
-            ->where('responder_client_id', $client->id)
-            ->exists();
-        if ($alreadyOffered) {
-            throw ValidationException::withMessages([
-                'donation' => 'Help has already been offered for this request.',
-            ]);
-        }
+            if ($lockedDonation->type !== DonationType::Request) {
+                throw ValidationException::withMessages([
+                    'donation' => 'Help can only be offered for a request.',
+                ]);
+            }
+            if ($lockedDonation->status !== DonationStatus::Pending) {
+                throw ValidationException::withMessages([
+                    'donation' => 'This request is no longer available.',
+                ]);
+            }
+            if ($lockedDonation->client_id === $client->id) {
+                throw ValidationException::withMessages([
+                    'donation' => 'You cannot offer help on your own request.',
+                ]);
+            }
 
-        $response = DonationResponse::create([
-            'request_donation_id' => $donation->id,
-            'responder_client_id' => $client->id,
-            'additional_note' => $validated['additional_note'] ?? null,
-            'location' => $validated['location'],
-            'status' => DonationResponseStatus::Pending,
-        ]);
+            $alreadyOffered = DonationResponse::where(
+                'request_donation_id',
+                $lockedDonation->id
+            )->where('responder_client_id', $client->id)->exists();
+            if ($alreadyOffered) {
+                throw ValidationException::withMessages([
+                    'donation' => 'Help has already been offered for this request.',
+                ]);
+            }
+
+            return DonationResponse::create([
+                'request_donation_id' => $lockedDonation->id,
+                'responder_client_id' => $client->id,
+                'additional_note' => $validated['additional_note'] ?? null,
+                'location' => $validated['location'],
+                'status' => DonationResponseStatus::Pending,
+            ]);
+        });
 
         return new DonationResponseResource(
             $response->load(['requestDonation.client.user', 'responder.user'])
@@ -83,6 +88,11 @@ class DonationResponseController extends Controller
     {
         return DonationResponseResource::collection(
             DonationResponse::with(['requestDonation.client.user', 'responder.user'])
+                ->where('status', DonationResponseStatus::Pending->value)
+                ->whereHas(
+                    'requestDonation',
+                    fn ($query) => $query->where('status', DonationStatus::Pending->value)
+                )
                 ->latest()
                 ->paginate(min((int) $request->input('per_page', 15), 100))
         );
@@ -150,7 +160,8 @@ class DonationResponseController extends Controller
             $match = $matchingService->match($requestDonation, $offer);
             $matchingService->accept(
                 $match,
-                $request->user()->donationTeam->id
+                $request->user()->donationTeam->id,
+                $lockedResponse->id
             );
 
             $lockedResponse->update([

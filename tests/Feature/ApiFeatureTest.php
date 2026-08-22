@@ -10,7 +10,10 @@ use App\Models\DonationTeam;
 use App\Models\SosRequest;
 use App\Models\SosTeam;
 use App\Models\User;
+use App\Notifications\DomainNotification;
+use App\Services\DonationExpirationService;
 use App\Services\DonationMatchingService;
+use Carbon\CarbonImmutable;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Schema;
 use Illuminate\Validation\ValidationException;
@@ -20,6 +23,42 @@ use Tests\TestCase;
 class ApiFeatureTest extends TestCase
 {
     use RefreshDatabase;
+
+    public function test_admin_only_sees_and_reads_admin_relevant_notifications(): void
+    {
+        $admin = Admin::factory()->create();
+        $admin->user->notify(new DomainNotification([
+            'event' => 'contact_message',
+            'message' => 'A client contacted the administration.',
+        ]));
+        $admin->user->notify(new DomainNotification([
+            'event' => 'donation_match_accepted',
+            'matched_donation_id' => 1,
+        ]));
+
+        Sanctum::actingAs($admin->user);
+
+        $this->getJson('/api/notifications')
+            ->assertOk()
+            ->assertJsonCount(1, 'data')
+            ->assertJsonPath('data.0.data.event', 'contact_message');
+
+        $hiddenNotification = $admin->user->notifications()
+            ->where('data->event', 'donation_match_accepted')
+            ->firstOrFail();
+        $this->patchJson("/api/notifications/{$hiddenNotification->id}/read")
+            ->assertNotFound();
+
+        $this->patchJson('/api/notifications/read-all')->assertNoContent();
+
+        $this->assertNotNull(
+            $admin->user->notifications()
+                ->where('data->event', 'contact_message')
+                ->firstOrFail()
+                ->read_at
+        );
+        $this->assertNull($hiddenNotification->fresh()->read_at);
+    }
 
     public function test_admin_can_create_deactivate_edit_and_delete_team_accounts(): void
     {
@@ -296,6 +335,72 @@ class ApiFeatureTest extends TestCase
         $this->assertSame('accepted', $offeredDonation->fresh()->status->value);
     }
 
+    public function test_fulfilling_request_closes_other_pending_help_responses(): void
+    {
+        $requestDonation = Donation::factory()->create([
+            'client_id' => Client::factory(),
+            'details' => ['blood_type' => 'O+', 'units' => 2],
+        ]);
+        $offeredDonation = Donation::factory()->create([
+            'client_id' => Client::factory(),
+            'type' => 'donation',
+            'details' => ['blood_type' => 'O+', 'units' => 2],
+        ]);
+        $helper = Client::factory()->create();
+        $response = DonationResponse::factory()->create([
+            'request_donation_id' => $requestDonation->id,
+            'responder_client_id' => $helper->id,
+        ]);
+
+        $match = app(DonationMatchingService::class)->match(
+            $requestDonation,
+            $offeredDonation
+        );
+        $team = DonationTeam::factory()->create();
+        Sanctum::actingAs($team->user);
+
+        $this->postJson("/api/donation-team/matches/{$match->id}/accept")
+            ->assertOk();
+
+        $this->assertSame('rejected', $response->fresh()->status->value);
+        $this->assertNotNull($response->fresh()->rejected_at);
+        $this->assertDatabaseHas('notifications', [
+            'notifiable_id' => $helper->user->id,
+            'data->event' => 'help_offer_closed',
+        ]);
+    }
+
+    public function test_partial_match_keeps_help_responses_pending(): void
+    {
+        $requestDonation = Donation::factory()->create([
+            'client_id' => Client::factory(),
+            'category' => 'food',
+            'details' => ['food_type' => 'rice', 'quantity' => 4],
+        ]);
+        $offeredDonation = Donation::factory()->create([
+            'client_id' => Client::factory(),
+            'type' => 'donation',
+            'category' => 'food',
+            'details' => ['food_type' => 'rice', 'quantity' => 2],
+        ]);
+        $response = DonationResponse::factory()->create([
+            'request_donation_id' => $requestDonation->id,
+            'responder_client_id' => Client::factory(),
+        ]);
+
+        $match = app(DonationMatchingService::class)->match(
+            $requestDonation,
+            $offeredDonation
+        );
+        $team = DonationTeam::factory()->create();
+        Sanctum::actingAs($team->user);
+
+        $this->postJson("/api/donation-team/matches/{$match->id}/accept")
+            ->assertOk();
+
+        $this->assertSame('pending', $response->fresh()->status->value);
+    }
+
     public function test_help_offer_does_not_create_match_until_team_accepts_it(): void
     {
         $owner = Client::factory()->create();
@@ -377,6 +482,72 @@ class ApiFeatureTest extends TestCase
 
         $this->assertSame(4, $requestDonation->fresh()->details['units']);
         $this->assertDatabaseCount('matched_donations', 0);
+    }
+
+    public function test_expired_offer_is_failed_and_unfinished_match_is_released(): void
+    {
+        $requestDonation = Donation::factory()->create([
+            'client_id' => Client::factory(),
+            'category' => 'food',
+            'details' => ['food_type' => 'rice', 'quantity' => 2],
+        ]);
+        $offerClient = Client::factory()->create();
+        $offeredDonation = Donation::factory()->create([
+            'client_id' => $offerClient->id,
+            'type' => 'donation',
+            'category' => 'food',
+            'details' => [
+                'food_type' => 'rice',
+                'quantity' => 2,
+                'expiration_date' => CarbonImmutable::tomorrow('Asia/Beirut')->format('Y-m-d'),
+            ],
+        ]);
+        $match = app(DonationMatchingService::class)->match(
+            $requestDonation,
+            $offeredDonation
+        );
+        $offeredDonation->update([
+            'details' => [
+                'food_type' => 'rice',
+                'quantity' => 2,
+                'expiration_date' => CarbonImmutable::yesterday('Asia/Beirut')->format('Y-m-d'),
+            ],
+        ]);
+
+        $this->assertTrue(
+            app(DonationExpirationService::class)->expire($offeredDonation->fresh())
+        );
+
+        $this->assertSame('expired', $offeredDonation->fresh()->status->value);
+        $this->assertSame('pending', $requestDonation->fresh()->status->value);
+        $this->assertSame('rejected', $match->fresh()->status->value);
+        $this->assertDatabaseHas('notifications', [
+            'notifiable_id' => $offerClient->user->id,
+            'data->event' => 'donation_expired',
+        ]);
+        $this->assertDatabaseHas('notifications', [
+            'notifiable_id' => $requestDonation->client->user->id,
+            'data->event' => 'donation_match_expired',
+        ]);
+    }
+
+    public function test_expired_offer_date_is_rejected_when_created(): void
+    {
+        $client = Client::factory()->create();
+        Sanctum::actingAs($client->user);
+
+        $this->postJson('/api/donations', [
+            'type' => 'donation',
+            'category' => 'medicine',
+            'location' => 'beirut',
+            'details' => [
+                'medicine_name' => 'Pain relief',
+                'dose' => '500 mg',
+                'quantity' => 1,
+                'expiration_date' => CarbonImmutable::yesterday('Asia/Beirut')->format('Y-m-d'),
+            ],
+        ])->assertUnprocessable()
+            ->assertJsonValidationErrors('details.expiration_date');
     }
 
     public function test_donation_detail_rules(): void

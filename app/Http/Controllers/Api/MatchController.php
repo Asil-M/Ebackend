@@ -22,6 +22,10 @@ class MatchController extends Controller
             'requestDonation.client.user',
             'offeredDonation.client.user',
         ])
+            ->when(
+                $request->input('status') === MatchStatus::Matched->value,
+                fn ($query) => $query->where('status', MatchStatus::Matched->value)
+            )
             ->latest()
             ->paginate(min((int) $request->input('per_page', 15), 100));
 

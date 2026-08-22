@@ -2,6 +2,7 @@
 
 namespace App\Http\Requests;
 
+use Carbon\CarbonImmutable;
 use Illuminate\Foundation\Http\FormRequest;
 use Illuminate\Validation\Rule;
 use Illuminate\Validation\Validator;
@@ -59,6 +60,34 @@ class DonationRequest extends FormRequest
                     && in_array($this->category, ['food', 'medicine'], true)
                 ) {
                     $requiredFields[] = 'expiration_date';
+
+                    $expirationDate = $details['expiration_date'] ?? null;
+                    if (is_string($expirationDate) && $expirationDate !== '') {
+                        try {
+                            $expiration = CarbonImmutable::createFromFormat(
+                                '!Y-m-d',
+                                $expirationDate,
+                                'Asia/Beirut'
+                            );
+                        } catch (\Throwable) {
+                            $expiration = false;
+                        }
+
+                        if (
+                            $expiration === false
+                            || $expiration->format('Y-m-d') !== $expirationDate
+                        ) {
+                            $validator->errors()->add(
+                                'details.expiration_date',
+                                'Enter a valid expiration date.'
+                            );
+                        } elseif ($expiration->lt(CarbonImmutable::today('Asia/Beirut'))) {
+                            $validator->errors()->add(
+                                'details.expiration_date',
+                                'Expiration date cannot be in the past.'
+                            );
+                        }
+                    }
                 }
 
                 foreach ($requiredFields as $field) {

@@ -5,9 +5,12 @@ namespace App\Services;
 use App\Enums\DonationStatus;
 use App\Enums\DonationType;
 use App\Enums\DonationCategory;
+use App\Enums\DonationResponseStatus;
 use App\Enums\MatchStatus;
 use App\Models\Donation;
+use App\Models\DonationResponse;
 use App\Models\MatchedDonation;
+use App\Notifications\DomainNotification;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\ValidationException;
 
@@ -18,6 +21,8 @@ class DonationMatchingService
         Donation $offeredDonation,
         ?int $teamId = null
     ): MatchedDonation {
+        app(DonationExpirationService::class)->expire($offeredDonation);
+
         return DB::transaction(function () use ($requestDonation, $offeredDonation, $teamId) {
             $request = Donation::lockForUpdate()->findOrFail($requestDonation->id);
             $offer = Donation::lockForUpdate()->findOrFail($offeredDonation->id);
@@ -79,7 +84,10 @@ class DonationMatchingService
                             });
                     });
             })
-            ->first();
+            ->get()
+            ->first(fn (Donation $candidate) => ! DonationExpirationService::isExpired(
+                $donation->type === DonationType::Donation ? $donation : $candidate
+            ));
 
         if (! $candidate) {
             return null;
@@ -92,11 +100,22 @@ class DonationMatchingService
 
     public function accept(
         MatchedDonation $matchedDonation,
-        int $teamId
+        int $teamId,
+        ?int $excludedResponseId = null
     ): MatchedDonation {
-        $remainingDonation = null;
+        $matchedDonation->loadMissing('offeredDonation');
+        app(DonationExpirationService::class)->expire($matchedDonation->offeredDonation);
 
-        $match = DB::transaction(function () use ($matchedDonation, $teamId, &$remainingDonation) {
+        $remainingDonation = null;
+        $closedResponses = collect();
+
+        $match = DB::transaction(function () use (
+            $matchedDonation,
+            $teamId,
+            $excludedResponseId,
+            &$remainingDonation,
+            &$closedResponses
+        ) {
             $lockedMatch = MatchedDonation::lockForUpdate()->findOrFail($matchedDonation->id);
 
             if ($lockedMatch->status !== MatchStatus::Matched) {
@@ -142,8 +161,35 @@ class DonationMatchingService
                 ? $request
                 : ($offerRemaining['has_remaining'] ? $offer : null);
 
+            if (! $requestRemaining['has_remaining']) {
+                $closedResponses = DonationResponse::with('responder.user')
+                    ->where('request_donation_id', $request->id)
+                    ->where('status', DonationResponseStatus::Pending)
+                    ->when(
+                        $excludedResponseId !== null,
+                        fn ($query) => $query->where('id', '!=', $excludedResponseId)
+                    )
+                    ->lockForUpdate()
+                    ->get();
+
+                foreach ($closedResponses as $response) {
+                    $response->update([
+                        'status' => DonationResponseStatus::Rejected,
+                        'rejected_at' => now(),
+                    ]);
+                }
+            }
+
             return $lockedMatch;
         });
+
+        foreach ($closedResponses as $response) {
+            $response->responder->user->notify(new DomainNotification([
+                'event' => 'help_offer_closed',
+                'donation_response_id' => $response->id,
+                'request_donation_id' => $response->request_donation_id,
+            ]));
+        }
 
         if ($remainingDonation) {
             $this->autoMatch($remainingDonation->fresh());
