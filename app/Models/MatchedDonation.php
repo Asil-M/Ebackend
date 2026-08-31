@@ -30,11 +30,13 @@ class MatchedDonation extends Model
 
     public function requestDonation()
     {
-        return $this->belongsTo(Donation::class, 'request_donation_id');
+        return $this->belongsTo(Donation::class, 'request_donation_id')
+            ->withTrashed();
     }
 
     public function offeredDonation()
     {
-        return $this->belongsTo(Donation::class, 'offered_donation_id');
+        return $this->belongsTo(Donation::class, 'offered_donation_id')
+            ->withTrashed();
     }
 }

@@ -43,6 +43,23 @@ class NotificationController extends Controller
         return response()->noContent();
     }
 
+    /** Delete one owned, visible notification. */
+    public function destroy(Request $request, string $id)
+    {
+        $notification = $this->visibleNotifications($request)->findOrFail($id);
+        $notification->delete();
+
+        return response()->noContent();
+    }
+
+    /** Delete all owned, visible notifications. */
+    public function destroyAll(Request $request)
+    {
+        $this->visibleNotifications($request)->delete();
+
+        return response()->noContent();
+    }
+
     /** Limit notifications to the domain events relevant to the user's role. */
     private function visibleNotifications(Request $request): MorphMany
     {

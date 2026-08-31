@@ -25,4 +25,9 @@ class SosTeam extends Model
     {
         return $this->hasMany(SosRequest::class, 'accepted_by_sos_team_id');
     }
+
+    public function rejectedRequests()
+    {
+        return $this->hasMany(SosRequest::class, 'rejected_by_sos_team_id');
+    }
 }

@@ -19,6 +19,7 @@ class SosRequest extends Model
             'type' => SosType::class,
             'status' => SosStatus::class,
             'accepted_at' => 'datetime',
+            'rejected_at' => 'datetime',
             'failed_at' => 'datetime',
             'latitude' => 'decimal:7',
             'longitude' => 'decimal:7',
@@ -35,5 +36,10 @@ class SosRequest extends Model
     public function acceptedBy()
     {
         return $this->belongsTo(SosTeam::class, 'accepted_by_sos_team_id');
+    }
+
+    public function rejectedBy()
+    {
+        return $this->belongsTo(SosTeam::class, 'rejected_by_sos_team_id');
     }
 }

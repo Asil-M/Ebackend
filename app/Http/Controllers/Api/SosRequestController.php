@@ -66,6 +66,47 @@ class SosRequestController extends Controller
         );
     }
 
+    /** Reject an invalid pending request for every SOS team. */
+    public function reject(Request $request, SosRequest $sosRequest): SosRequestResource
+    {
+        $validated = $request->validate([
+            'reason' => [
+                'required',
+                'string',
+                'max:255',
+                'in:Duplicate request,Client cancelled,False request confirmed,Invalid location,Invalid request',
+            ],
+        ]);
+
+        DB::transaction(function () use ($request, $sosRequest, $validated) {
+            $lockedRequest = SosRequest::lockForUpdate()->findOrFail($sosRequest->id);
+
+            abort_unless(
+                $lockedRequest->status === SosStatus::Pending,
+                409,
+                'Request is no longer pending.'
+            );
+
+            $lockedRequest->update([
+                'status' => SosStatus::Rejected,
+                'rejected_by_sos_team_id' => $request->user()->sosTeam->id,
+                'rejection_reason' => $validated['reason'],
+                'rejected_at' => now(),
+            ]);
+
+            return $lockedRequest;
+        });
+
+        $sosRequest->refresh()->loadMissing('client.user');
+        $sosRequest->client->user->notify(new DomainNotification([
+            'event' => 'sos_request_rejected',
+            'sos_request_id' => $sosRequest->id,
+            'reason' => $validated['reason'],
+        ]));
+
+        return new SosRequestResource($sosRequest);
+    }
+
     /** Accept a pending SOS request and attach the selected facility. */
     public function accept(Request $request, SosRequest $sosRequest): SosRequestResource
     {

@@ -28,6 +28,7 @@ class SosRequestResource extends JsonResource
                 ];
             }),
             'accepted_by_sos_team_id' => $this->accepted_by_sos_team_id,
+            'rejected_by_sos_team_id' => $this->rejected_by_sos_team_id,
             'type' => $this->type,
             'status' => $this->status,
             'location_name' => $this->location_name,
@@ -41,6 +42,8 @@ class SosRequestResource extends JsonResource
             'eta_minutes' => $etaMinutes,
             'accepted_at' => $this->accepted_at,
             'failed_at' => $this->failed_at,
+            'rejection_reason' => $this->rejection_reason,
+            'rejected_at' => $this->rejected_at,
             'created_at' => $this->created_at,
         ];
     }

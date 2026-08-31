@@ -7,6 +7,7 @@ use App\Models\Admin;
 use App\Models\Donation;
 use App\Models\DonationResponse;
 use App\Models\DonationTeam;
+use App\Models\MatchedDonation;
 use App\Models\SosRequest;
 use App\Models\SosTeam;
 use App\Models\User;
@@ -23,6 +24,48 @@ use Tests\TestCase;
 class ApiFeatureTest extends TestCase
 {
     use RefreshDatabase;
+
+    public function test_admin_can_view_platform_statistics(): void
+    {
+        $admin = Admin::factory()->create();
+        User::factory()->count(2)->create();
+        SosTeam::factory()->create();
+        SosTeam::factory()->create(['is_active' => false]);
+        DonationTeam::factory()->create();
+        SosRequest::factory()->create(['status' => 'accepted', 'type' => 'fire']);
+        SosRequest::factory()->create(['status' => 'pending', 'type' => 'ambulance']);
+        Donation::factory()->create(['type' => 'request', 'category' => 'blood']);
+        Donation::factory()->create(['type' => 'donation', 'category' => 'food']);
+        DonationResponse::factory()->create(['status' => 'accepted']);
+        MatchedDonation::factory()->create(['status' => 'accepted']);
+
+        Sanctum::actingAs($admin->user);
+
+        $this->getJson('/api/admin/statistics')
+            ->assertOk()
+            ->assertJsonPath('data.accounts.users', 10)
+            ->assertJsonPath('data.accounts.sos_teams', 2)
+            ->assertJsonPath('data.accounts.active_sos_teams', 1)
+            ->assertJsonPath('data.accounts.donation_teams', 1)
+            ->assertJsonPath('data.sos.total', 2)
+            ->assertJsonPath('data.sos.by_status.accepted', 1)
+            ->assertJsonPath('data.sos.by_type.fire', 1)
+            ->assertJsonPath('data.donations.by_type.request', 3)
+            ->assertJsonPath('data.donations.by_type.donation', 2)
+            ->assertJsonPath('data.donations.by_category.food', 1)
+            ->assertJsonPath('data.responses.by_status.accepted', 1)
+            ->assertJsonPath('data.matches.by_status.accepted', 1)
+            ->assertJsonCount(7, 'data.activity')
+            ->assertJsonPath('data.activity.6.sos', 2)
+            ->assertJsonPath('data.activity.6.donations', 5);
+    }
+
+    public function test_non_admin_cannot_view_platform_statistics(): void
+    {
+        Sanctum::actingAs(User::factory()->create());
+
+        $this->getJson('/api/admin/statistics')->assertForbidden();
+    }
 
     public function test_admin_only_sees_and_reads_admin_relevant_notifications(): void
     {
@@ -58,6 +101,43 @@ class ApiFeatureTest extends TestCase
                 ->read_at
         );
         $this->assertNull($hiddenNotification->fresh()->read_at);
+    }
+
+    public function test_user_can_delete_only_their_own_visible_notification(): void
+    {
+        $client = Client::factory()->create();
+        $otherClient = Client::factory()->create();
+        $client->user->notify(new DomainNotification(['event' => 'donation_match_accepted']));
+        $otherClient->user->notify(new DomainNotification(['event' => 'donation_match_accepted']));
+
+        $ownedNotification = $client->user->notifications()->firstOrFail();
+        $otherNotification = $otherClient->user->notifications()->firstOrFail();
+
+        Sanctum::actingAs($client->user);
+
+        $this->deleteJson("/api/notifications/{$otherNotification->id}")
+            ->assertNotFound();
+        $this->deleteJson("/api/notifications/{$ownedNotification->id}")
+            ->assertNoContent();
+
+        $this->assertDatabaseMissing('notifications', ['id' => $ownedNotification->id]);
+        $this->assertDatabaseHas('notifications', ['id' => $otherNotification->id]);
+    }
+
+    public function test_user_can_delete_all_their_notifications(): void
+    {
+        $client = Client::factory()->create();
+        $otherClient = Client::factory()->create();
+        $client->user->notify(new DomainNotification(['event' => 'donation_match_accepted']));
+        $client->user->notify(new DomainNotification(['event' => 'help_offer_accepted']));
+        $otherClient->user->notify(new DomainNotification(['event' => 'donation_match_accepted']));
+
+        Sanctum::actingAs($client->user);
+
+        $this->deleteJson('/api/notifications')->assertNoContent();
+
+        $this->assertCount(0, $client->user->fresh()->notifications);
+        $this->assertCount(1, $otherClient->user->fresh()->notifications);
     }
 
     public function test_admin_can_create_deactivate_edit_and_delete_team_accounts(): void
@@ -201,6 +281,31 @@ class ApiFeatureTest extends TestCase
         $this->assertFalse(Schema::hasColumn('sos_requests', 'eta_minutes'));
     }
 
+    public function test_sos_rejection_closes_request_for_all_teams(): void
+    {
+        $sosRequest = SosRequest::factory()->create();
+        $rejectingTeam = SosTeam::factory()->create();
+        $otherTeam = SosTeam::factory()->create();
+
+        Sanctum::actingAs($rejectingTeam->user);
+        $this->postJson("/api/sos-team/requests/{$sosRequest->id}/reject", [
+            'reason' => 'Invalid request',
+        ])->assertOk()->assertJsonPath('data.status', 'rejected');
+
+        $this->assertDatabaseHas('sos_requests', [
+            'id' => $sosRequest->id,
+            'status' => 'rejected',
+            'rejected_by_sos_team_id' => $rejectingTeam->id,
+            'rejection_reason' => 'Invalid request',
+        ]);
+        $this->getJson('/api/sos-team/requests/pending')
+            ->assertJsonMissing(['id' => $sosRequest->id]);
+
+        Sanctum::actingAs($otherTeam->user);
+        $this->getJson('/api/sos-team/requests/pending')
+            ->assertJsonMissing(['id' => $sosRequest->id]);
+    }
+
     public function test_rejection_restores_pending_and_preserves_pair(): void
     {
         $requestClient = Client::factory()->create();
@@ -234,6 +339,50 @@ class ApiFeatureTest extends TestCase
         $matchingService->match(
             $requestDonation->fresh(),
             $offeredDonation->fresh()
+        );
+    }
+
+    public function test_owner_can_soft_delete_rejected_donation_without_losing_match_history(): void
+    {
+        $requestDonation = Donation::factory()->create();
+        $offeredDonation = Donation::factory()->create([
+            'client_id' => Client::factory(),
+            'type' => 'donation',
+        ]);
+        $match = app(DonationMatchingService::class)->match(
+            $requestDonation,
+            $offeredDonation
+        );
+
+        $team = DonationTeam::factory()->create();
+        Sanctum::actingAs($team->user);
+        $this->postJson("/api/donation-team/matches/{$match->id}/reject")
+            ->assertOk();
+
+        Sanctum::actingAs($requestDonation->client->user);
+        $this->deleteJson("/api/donations/{$requestDonation->id}")
+            ->assertNoContent();
+
+        $this->assertSoftDeleted('donations', ['id' => $requestDonation->id]);
+        $this->assertNull(Donation::find($requestDonation->id));
+        $this->assertDatabaseHas('matched_donations', [
+            'id' => $match->id,
+            'status' => 'rejected',
+        ]);
+
+        $historicalMatch = MatchedDonation::with([
+            'requestDonation',
+            'offeredDonation',
+        ])->findOrFail($match->id);
+
+        $this->assertSame(
+            $requestDonation->id,
+            $historicalMatch->requestDonation->id
+        );
+        $this->assertNotNull($historicalMatch->requestDonation->deleted_at);
+        $this->assertSame(
+            $offeredDonation->id,
+            $historicalMatch->offeredDonation->id
         );
     }
 

@@ -2,6 +2,7 @@
 
 use App\Http\Controllers\Api\AdminTeamController;
 use App\Http\Controllers\Api\AdminAccountController;
+use App\Http\Controllers\Api\AdminStatisticsController;
 use App\Http\Controllers\Api\AuthController;
 use App\Http\Controllers\Api\ClientController;
 use App\Http\Controllers\Api\ContactMessageController;
@@ -42,8 +43,11 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::get('notifications/unread', [NotificationController::class, 'unread']);
     Route::patch('notifications/read-all', [NotificationController::class, 'readAll']);
     Route::patch('notifications/{id}/read', [NotificationController::class, 'read']);
+    Route::delete('notifications', [NotificationController::class, 'destroyAll']);
+    Route::delete('notifications/{id}', [NotificationController::class, 'destroy']);
 
     Route::prefix('admin')->middleware('admin')->group(function () {
+        Route::get('statistics', AdminStatisticsController::class);
         Route::get('accounts', [AdminAccountController::class, 'index']);
         Route::post('teams', [AdminAccountController::class, 'storeTeam']);
         Route::get('accounts/{user}', [AdminAccountController::class, 'show']);
@@ -70,6 +74,10 @@ Route::middleware('auth:sanctum')->group(function () {
         Route::post(
             'sos-team/requests/{sosRequest}/accept',
             [SosRequestController::class, 'accept']
+        );
+        Route::post(
+            'sos-team/requests/{sosRequest}/reject',
+            [SosRequestController::class, 'reject']
         );
         Route::post(
             'sos-team/requests/{sosRequest}/fail',
