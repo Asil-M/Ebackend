@@ -19,15 +19,21 @@ class DonationMatchingService
     public function match(
         Donation $requestDonation,
         Donation $offeredDonation,
-        ?int $teamId = null
+        ?int $teamId = null,
+        ?int $reviewResponseId = null
     ): MatchedDonation {
         app(DonationExpirationService::class)->expire($offeredDonation);
 
-        return DB::transaction(function () use ($requestDonation, $offeredDonation, $teamId) {
+        return DB::transaction(function () use (
+            $requestDonation,
+            $offeredDonation,
+            $teamId,
+            $reviewResponseId
+        ) {
             $request = Donation::lockForUpdate()->findOrFail($requestDonation->id);
             $offer = Donation::lockForUpdate()->findOrFail($offeredDonation->id);
 
-            if (! $this->areEligible($request, $offer)) {
+            if (! $this->areEligible($request, $offer, $reviewResponseId)) {
                 throw ValidationException::withMessages([
                     'match' => 'Donations are not eligible to match.',
                 ]);
@@ -61,6 +67,21 @@ class DonationMatchingService
 
     public function autoMatch(Donation $donation): ?MatchedDonation
     {
+        // An explicit review reservation must never compete with auto-matching.
+        if ($donation->status === DonationStatus::AwaitingReview) {
+            return null;
+        }
+
+        // Keep the relationship check as defense-in-depth for older records.
+        if (
+            $donation->type === DonationType::Request
+            && $donation->responses()
+                ->where('status', DonationResponseStatus::Pending->value)
+                ->exists()
+        ) {
+            return null;
+        }
+
         $oppositeType = $donation->type === DonationType::Request
             ? DonationType::Donation
             : DonationType::Request;
@@ -70,6 +91,16 @@ class DonationMatchingService
             ->where('location', $donation->location)
             ->where('status', DonationStatus::Pending)
             ->where('client_id', '!=', $donation->client_id)
+            ->when(
+                $oppositeType === DonationType::Request,
+                fn ($query) => $query->whereDoesntHave(
+                    'responses',
+                    fn ($responseQuery) => $responseQuery->where(
+                        'status',
+                        DonationResponseStatus::Pending->value
+                    )
+                )
+            )
             ->whereNotExists(function ($query) use ($donation) {
                 $query->selectRaw(1)
                     ->from('matched_donations')
@@ -147,7 +178,15 @@ class DonationMatchingService
             $request->update([
                 'details' => $requestRemaining['details'],
                 'status' => $requestRemaining['has_remaining']
-                    ? DonationStatus::Pending
+                    ? ($request->responses()
+                        ->where('status', DonationResponseStatus::Pending)
+                        ->when(
+                            $excludedResponseId !== null,
+                            fn ($query) => $query->where('id', '!=', $excludedResponseId)
+                        )
+                        ->exists()
+                            ? DonationStatus::AwaitingReview
+                            : DonationStatus::Pending)
                     : DonationStatus::Accepted,
             ]);
             $offer->update([
@@ -198,15 +237,25 @@ class DonationMatchingService
         return $match;
     }
 
-    private function areEligible(Donation $request, Donation $offer): bool
+    private function areEligible(
+        Donation $request,
+        Donation $offer,
+        ?int $reviewResponseId = null
+    ): bool
     {
+        $hasUnapprovedHelpResponse = $reviewResponseId === null
+            && $request->responses()
+                ->where('status', DonationResponseStatus::Pending->value)
+                ->exists();
+
         return $request->id !== $offer->id
             && $request->type === DonationType::Request
             && $offer->type === DonationType::Donation
             && $request->client_id !== $offer->client_id
             && $request->status === DonationStatus::Pending
             && $offer->status === DonationStatus::Pending
-            && $request->category === $offer->category;
+            && $request->category === $offer->category
+            && ! $hasUnapprovedHelpResponse;
     }
 
     private function matchedQuantity(Donation $request, Donation $offer): float

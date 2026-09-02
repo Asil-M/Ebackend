@@ -44,7 +44,8 @@ class AdminStatisticsController extends Controller
                         'blood', 'money', 'clothes', 'food', 'medicine', 'other',
                     ]),
                     'by_status' => $this->countsBy(Donation::class, 'status', [
-                        'pending', 'matched', 'accepted', 'failed', 'expired',
+                        'pending', 'awaiting_review', 'matched', 'accepted',
+                        'failed', 'expired',
                     ]),
                 ],
                 'responses' => [

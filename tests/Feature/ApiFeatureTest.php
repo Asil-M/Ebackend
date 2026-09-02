@@ -573,6 +573,10 @@ class ApiFeatureTest extends TestCase
             ->json('data.id');
 
         $this->assertDatabaseCount('matched_donations', 0);
+        $this->assertSame(
+            'awaiting_review',
+            $requestDonation->fresh()->status->value
+        );
 
         $team = DonationTeam::factory()->create();
         Sanctum::actingAs($team->user);
@@ -589,6 +593,113 @@ class ApiFeatureTest extends TestCase
         ]);
         $this->assertSame(2, $requestDonation->fresh()->details['quantity']);
         $this->assertSame('pending', $requestDonation->fresh()->status->value);
+    }
+
+    public function test_pending_help_offer_reserves_request_from_automatic_matching(): void
+    {
+        $requestDonation = Donation::factory()->create([
+            'client_id' => Client::factory(),
+            'category' => 'food',
+            'location' => 'beirut',
+            'details' => ['food_type' => 'rice', 'quantity' => 4],
+        ]);
+        DonationResponse::factory()->create([
+            'request_donation_id' => $requestDonation->id,
+            'responder_client_id' => Client::factory(),
+            'status' => 'pending',
+        ]);
+        $offeredDonation = Donation::factory()->create([
+            'client_id' => Client::factory(),
+            'type' => 'donation',
+            'category' => 'food',
+            'location' => 'beirut',
+            'details' => ['food_type' => 'rice', 'quantity' => 4],
+        ]);
+
+        $match = app(DonationMatchingService::class)->autoMatch($offeredDonation);
+
+        $this->assertNull($match);
+        $this->assertDatabaseCount('matched_donations', 0);
+        $this->assertSame('pending', $requestDonation->fresh()->status->value);
+        $this->assertSame('pending', $offeredDonation->fresh()->status->value);
+    }
+
+    public function test_awaiting_review_request_is_not_matched_by_a_new_donation(): void
+    {
+        $owner = Client::factory()->create();
+        $helper = Client::factory()->create();
+        $donor = Client::factory()->create();
+        $requestDonation = Donation::factory()->create([
+            'client_id' => $owner->id,
+            'category' => 'food',
+            'location' => 'beirut',
+            'details' => ['food_type' => 'rice', 'quantity' => 4],
+        ]);
+
+        Sanctum::actingAs($helper->user);
+        $this->postJson("/api/donations/{$requestDonation->id}/responses", [
+            'additional_note' => 'I can help.',
+            'location' => 'beirut',
+        ])->assertOk();
+
+        $this->assertSame(
+            'awaiting_review',
+            $requestDonation->fresh()->status->value
+        );
+
+        Sanctum::actingAs($donor->user);
+        $offeredDonationId = $this->postJson('/api/donations', [
+            'type' => 'donation',
+            'category' => 'food',
+            'additional_note' => 'Rice available now.',
+            'location' => 'beirut',
+            'details' => [
+                'food_type' => 'rice',
+                'quantity' => 4,
+                'expiration_date' => now()->addDay()->format('Y-m-d'),
+            ],
+        ])->assertCreated()->json('data.id');
+
+        $this->assertDatabaseCount('matched_donations', 0);
+        $this->assertSame(
+            'awaiting_review',
+            $requestDonation->fresh()->status->value
+        );
+        $this->assertDatabaseHas('donations', [
+            'id' => $offeredDonationId,
+            'status' => 'pending',
+        ]);
+    }
+
+    public function test_pending_help_response_blocks_direct_matching(): void
+    {
+        $requestDonation = Donation::factory()->create([
+            'client_id' => Client::factory(),
+            'category' => 'food',
+            'location' => 'beirut',
+            'details' => ['food_type' => 'rice', 'quantity' => 4],
+            'status' => 'pending',
+        ]);
+        DonationResponse::factory()->create([
+            'request_donation_id' => $requestDonation->id,
+            'responder_client_id' => Client::factory(),
+            'status' => 'pending',
+        ]);
+        $offeredDonation = Donation::factory()->create([
+            'client_id' => Client::factory(),
+            'type' => 'donation',
+            'category' => 'food',
+            'location' => 'beirut',
+            'details' => ['food_type' => 'rice', 'quantity' => 4],
+            'status' => 'pending',
+        ]);
+
+        $this->expectException(ValidationException::class);
+
+        app(DonationMatchingService::class)->match(
+            $requestDonation,
+            $offeredDonation
+        );
     }
 
     public function test_helper_cannot_offer_help_twice_for_the_same_request(): void

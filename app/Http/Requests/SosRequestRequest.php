@@ -15,6 +15,7 @@ class SosRequestRequest extends FormRequest
     public function rules(): array
     {
         return [
+            'relay_message_id' => ['nullable', 'string', 'max:100'],
             'type' => ['required', Rule::in(['ambulance', 'fire', 'police'])],
             'location_name' => ['required', 'string', 'max:255'],
             'description' => ['required', 'string'],

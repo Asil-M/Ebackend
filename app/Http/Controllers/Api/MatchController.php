@@ -105,10 +105,18 @@ class MatchController extends Controller
             ]);
 
             // The pair record remains rejected, while both donations become available again.
-            Donation::whereKey([
-                $lockedMatch->request_donation_id,
-                $lockedMatch->offered_donation_id,
-            ])->update(['status' => DonationStatus::Pending]);
+            $requestDonation = Donation::findOrFail(
+                $lockedMatch->request_donation_id
+            );
+            $requestDonation->update([
+                'status' => $requestDonation->responses()
+                    ->where('status', 'pending')
+                    ->exists()
+                        ? DonationStatus::AwaitingReview
+                        : DonationStatus::Pending,
+            ]);
+            Donation::whereKey($lockedMatch->offered_donation_id)
+                ->update(['status' => DonationStatus::Pending]);
 
             return $lockedMatch;
         });

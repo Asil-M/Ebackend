@@ -70,13 +70,19 @@ class DonationResponseController extends Controller
                 ]);
             }
 
-            return DonationResponse::create([
+            $response = DonationResponse::create([
                 'request_donation_id' => $lockedDonation->id,
                 'responder_client_id' => $client->id,
                 'additional_note' => $validated['additional_note'] ?? null,
                 'location' => $validated['location'],
                 'status' => DonationResponseStatus::Pending,
             ]);
+
+            $lockedDonation->update([
+                'status' => DonationStatus::AwaitingReview,
+            ]);
+
+            return $response;
         });
 
         return new DonationResponseResource(
@@ -88,11 +94,6 @@ class DonationResponseController extends Controller
     {
         return DonationResponseResource::collection(
             DonationResponse::with(['requestDonation.client.user', 'responder.user'])
-                ->where('status', DonationResponseStatus::Pending->value)
-                ->whereHas(
-                    'requestDonation',
-                    fn ($query) => $query->where('status', DonationStatus::Pending->value)
-                )
                 ->latest()
                 ->paginate(min((int) $request->input('per_page', 15), 100))
         );
@@ -124,9 +125,12 @@ class DonationResponseController extends Controller
             $requestDonation = Donation::lockForUpdate()->findOrFail(
                 $lockedResponse->request_donation_id
             );
-            if ($requestDonation->status !== DonationStatus::Pending) {
+            if (! in_array($requestDonation->status, [
+                DonationStatus::AwaitingReview,
+                DonationStatus::Pending,
+            ], true)) {
                 throw ValidationException::withMessages([
-                    'request' => 'This request is no longer pending.',
+                    'request' => 'This request is no longer awaiting review.',
                 ]);
             }
 
@@ -157,7 +161,15 @@ class DonationResponseController extends Controller
                 'status' => DonationStatus::Pending,
             ]);
 
-            $match = $matchingService->match($requestDonation, $offer);
+            // The matching operation requires an available request. This
+            // temporary transition is contained by the outer transaction.
+            $requestDonation->update(['status' => DonationStatus::Pending]);
+            $match = $matchingService->match(
+                $requestDonation,
+                $offer,
+                null,
+                $lockedResponse->id
+            );
             $matchingService->accept(
                 $match,
                 $request->user()->donationTeam->id,
@@ -192,9 +204,16 @@ class DonationResponseController extends Controller
         );
     }
 
-    public function reject(DonationResponse $donationResponse): DonationResponseResource
+    public function reject(
+        DonationResponse $donationResponse,
+        DonationMatchingService $matchingService
+    ): DonationResponseResource
     {
-        $response = DB::transaction(function () use ($donationResponse) {
+        $requestToRematch = null;
+        $response = DB::transaction(function () use (
+            $donationResponse,
+            &$requestToRematch
+        ) {
             $lockedResponse = DonationResponse::lockForUpdate()
                 ->findOrFail($donationResponse->id);
             if ($lockedResponse->status !== DonationResponseStatus::Pending) {
@@ -208,8 +227,20 @@ class DonationResponseController extends Controller
                 'rejected_at' => now(),
             ]);
 
+            $requestDonation = Donation::lockForUpdate()->findOrFail(
+                $lockedResponse->request_donation_id
+            );
+            if ($requestDonation->status === DonationStatus::AwaitingReview) {
+                $requestDonation->update(['status' => DonationStatus::Pending]);
+                $requestToRematch = $requestDonation;
+            }
+
             return $lockedResponse;
         });
+
+        if ($requestToRematch) {
+            $matchingService->autoMatch($requestToRematch->fresh());
+        }
 
         $response->loadMissing('responder.user');
         $response->responder->user->notify(new DomainNotification([

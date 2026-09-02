@@ -8,6 +8,7 @@ use App\Http\Controllers\Controller;
 use App\Http\Requests\SosRequestRequest;
 use App\Http\Resources\SosRequestResource;
 use App\Models\SosRequest;
+use App\Models\User;
 use App\Notifications\DomainNotification;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
@@ -33,13 +34,54 @@ class SosRequestController extends Controller
         // An SOS request must belong to a client profile.
         abort_unless($request->user()->client, 403, 'Client profile required.');
 
-        $sosRequest = $request->user()->client->sosRequests()->create(
-            $request->validated() + ['status' => SosStatus::Pending]
+        $data = $request->validated();
+        $relayMessageId = $data['relay_message_id'] ?? null;
+        unset($data['relay_message_id']);
+        $values = $data + [
+            'client_id' => $request->user()->client->id,
+            'status' => SosStatus::Pending,
+        ];
+        $sosRequest = $relayMessageId
+            ? SosRequest::firstOrCreate(['relay_message_id' => $relayMessageId], $values)
+            : SosRequest::create($values);
+
+        return (new SosRequestResource($sosRequest->load(['client.user'])))
+            ->response()
+            ->setStatusCode($sosRequest->wasRecentlyCreated ? 201 : 200);
+    }
+
+    /** Store an SOS received by an authenticated nearby relay phone. */
+    public function relayStore(Request $request)
+    {
+        $data = $request->validate([
+            'relay_message_id' => ['required', 'string', 'max:100'],
+            'sender_email' => ['required', 'email'],
+            'type' => ['required', 'in:ambulance,fire,police'],
+            'location_name' => ['required', 'string', 'max:255'],
+            'description' => ['required', 'string'],
+            'latitude' => ['required', 'numeric', 'between:-90,90'],
+            'longitude' => ['required', 'numeric', 'between:-180,180'],
+        ]);
+
+        $sender = User::where('email', $data['sender_email'])->first();
+        abort_unless($sender?->client, 422, 'The SOS sender has no client profile.');
+
+        $sosRequest = SosRequest::firstOrCreate(
+            ['relay_message_id' => $data['relay_message_id']],
+            [
+                'client_id' => $sender->client->id,
+                'type' => $data['type'],
+                'location_name' => $data['location_name'],
+                'description' => $data['description'],
+                'latitude' => $data['latitude'],
+                'longitude' => $data['longitude'],
+                'status' => SosStatus::Pending,
+            ]
         );
 
         return (new SosRequestResource($sosRequest->load(['client.user'])))
             ->response()
-            ->setStatusCode(201);
+            ->setStatusCode($sosRequest->wasRecentlyCreated ? 201 : 200);
     }
 
     /** Show one SOS request if the user is allowed to see it. */

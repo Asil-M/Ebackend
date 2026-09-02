@@ -32,6 +32,8 @@ Route::middleware('auth:sanctum')->group(function () {
 
     Route::apiResource('sos-requests', SosRequestController::class)
         ->only(['index', 'store', 'show']);
+    Route::post('sos-requests/relay', [SosRequestController::class, 'relayStore'])
+        ->middleware('throttle:30,1');
     Route::apiResource('donations', DonationController::class);
     Route::get('donation-responses', [DonationResponseController::class, 'mine']);
     Route::post(
