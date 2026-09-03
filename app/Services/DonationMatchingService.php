@@ -116,7 +116,10 @@ class DonationMatchingService
                     });
             })
             ->get()
-            ->first(fn (Donation $candidate) => ! DonationExpirationService::isExpired(
+            ->first(fn (Donation $candidate) => $this->haveCompatibleDetails(
+                $donation,
+                $candidate
+            ) && ! DonationExpirationService::isExpired(
                 $donation->type === DonationType::Donation ? $donation : $candidate
             ));
 
@@ -255,7 +258,54 @@ class DonationMatchingService
             && $request->status === DonationStatus::Pending
             && $offer->status === DonationStatus::Pending
             && $request->category === $offer->category
+            && $request->location === $offer->location
+            && $this->haveCompatibleDetails($request, $offer)
             && ! $hasUnapprovedHelpResponse;
+    }
+
+    private function haveCompatibleDetails(Donation $first, Donation $second): bool
+    {
+        if ($first->category !== $second->category) {
+            return false;
+        }
+
+        return match ($first->category) {
+            DonationCategory::Blood => $this->sameDetail($first, $second, 'blood_type'),
+            DonationCategory::Money => $this->sameDetail($first, $second, 'currency'),
+            DonationCategory::Clothes => $this->sameDetail($first, $second, 'clothing_type')
+                && $this->compatibleAnyDetail($first, $second, 'gender')
+                && $this->sameDetail($first, $second, 'size'),
+            DonationCategory::Food => $this->sameDetail($first, $second, 'food_type'),
+            DonationCategory::Medicine => $this->sameDetail($first, $second, 'medicine_name')
+                && $this->sameDetail($first, $second, 'dose'),
+            DonationCategory::Other => $this->sameDetail($first, $second, 'custom_category'),
+        };
+    }
+
+    private function sameDetail(Donation $first, Donation $second, string $key): bool
+    {
+        $firstValue = $this->normalizeDetail($first->details[$key] ?? null);
+        $secondValue = $this->normalizeDetail($second->details[$key] ?? null);
+
+        return $firstValue !== '' && $firstValue === $secondValue;
+    }
+
+    private function compatibleAnyDetail(
+        Donation $first,
+        Donation $second,
+        string $key
+    ): bool {
+        $firstValue = $this->normalizeDetail($first->details[$key] ?? null);
+        $secondValue = $this->normalizeDetail($second->details[$key] ?? null);
+
+        return $firstValue === 'any'
+            || $secondValue === 'any'
+            || ($firstValue !== '' && $firstValue === $secondValue);
+    }
+
+    private function normalizeDetail(mixed $value): string
+    {
+        return mb_strtolower(trim((string) $value));
     }
 
     private function matchedQuantity(Donation $request, Donation $offer): float
